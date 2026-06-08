@@ -50,7 +50,7 @@ defmodule ExWebull.MixProject do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
-      files: ~w(lib .formatter.exs mix.exs README.md)
+      files: ~w(lib .formatter.exs mix.exs README.md LICENSE)
     ]
   end
 
