@@ -55,7 +55,7 @@ defmodule ExWebull.MixProject do
     [
       {:req, "~> 0.5"},
       {:jason, "~> 1.4"},
-      {:decimal, "~> 2.0"},
+      {:decimal, "~> 2.0 or ~> 3.0"},
       {:tortoise311, "~> 0.12"},
       {:grpc, "~> 0.9"},
       {:protobuf, "~> 0.13"},
