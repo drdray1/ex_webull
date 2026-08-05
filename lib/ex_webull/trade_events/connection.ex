@@ -154,7 +154,10 @@ defmodule ExWebull.TradeEvents.Connection do
     payload = SubscribeRequest.encode(request) |> IO.iodata_to_binary()
     metadata = Auth.build_metadata(state.app_key, state.app_secret, payload)
 
-    with {:ok, channel} <- GRPC.Stub.connect(target, cred: cred),
+    # grpc 1.0 defaults to the Gun adapter and makes gun an optional dep; we
+    # ask for Mint explicitly so the transport matches what we actually pull in.
+    with {:ok, channel} <-
+           GRPC.Stub.connect(target, cred: cred, adapter: GRPC.Client.Adapters.Mint),
          {:ok, stream} <- Stub.subscribe(channel, request, metadata: metadata) do
       owner = self()
       pid = spawn_link(fn -> consume(stream, owner) end)
