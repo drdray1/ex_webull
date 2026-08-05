@@ -12,56 +12,11 @@ defmodule ExWebull.AccountTest do
     Req.Test.expect(stub, fn conn ->
       assert conn.method == "GET"
       assert conn.request_path == "/openapi/account/list"
+      assert Plug.Conn.get_req_header(conn, "x-version") == ["v2"]
       Req.Test.json(conn, account_list_response())
     end)
 
     assert {:ok, %{"accounts" => [_ | _]}} = ExWebull.Account.list(client)
-  end
-
-  test "balance/2 sends account_id query param", %{stub: stub, client: client} do
-    Req.Test.expect(stub, fn conn ->
-      assert conn.request_path == "/openapi/account/balance"
-      assert conn.query_string =~ "account_id=ACC-1"
-      Req.Test.json(conn, balance_response())
-    end)
-
-    assert {:ok, %{"account_id" => "ACC-1"}} = ExWebull.Account.balance(client, "ACC-1")
-  end
-
-  test "positions/2 sends account_id query param", %{stub: stub, client: client} do
-    Req.Test.expect(stub, fn conn ->
-      assert conn.request_path == "/openapi/account/positions"
-      assert conn.query_string =~ "account_id=ACC-1"
-      Req.Test.json(conn, %{"positions" => []})
-    end)
-
-    assert {:ok, %{"positions" => []}} = ExWebull.Account.positions(client, "ACC-1")
-  end
-
-  test "position_details/3 includes size and last_instrument_id", %{stub: stub, client: client} do
-    Req.Test.expect(stub, fn conn ->
-      assert conn.request_path == "/openapi/account/position/details"
-      assert conn.query_string =~ "account_id=ACC-1"
-      assert conn.query_string =~ "size=50"
-      assert conn.query_string =~ "last_instrument_id=XYZ"
-      Req.Test.json(conn, %{"positions" => []})
-    end)
-
-    assert {:ok, _} =
-             ExWebull.Account.position_details(client, "ACC-1",
-               size: 50,
-               last_instrument_id: "XYZ"
-             )
-  end
-
-  test "profile/1 hits the legacy profile path", %{stub: stub, client: client} do
-    Req.Test.expect(stub, fn conn ->
-      assert conn.method == "GET"
-      assert conn.request_path == "/account/profile"
-      Req.Test.json(conn, %{"user_id" => "U-1"})
-    end)
-
-    assert {:ok, %{"user_id" => "U-1"}} = ExWebull.Account.profile(client)
   end
 
   test "401 returns :unauthorized tag", %{stub: stub, client: client} do

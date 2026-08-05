@@ -1,49 +1,56 @@
 defmodule ExWebull.Mqtt.Message do
   @moduledoc """
-  Decode MQTT market-push payloads to typed protobuf structs.
+  Decode MQTT market-push payloads.
 
-  Payload type codes match the Python SDK's `payload_type.py`:
-
-    - `0` — `Quote` (`ExWebull.Proto.Message.Quote`)
-    - `1` — `Snapshot` (`ExWebull.Proto.Message.Snapshot`)
-    - `2` — `Tick` (`ExWebull.Proto.Message.Tick`)
-
-  Unknown payload types fall back to returning the raw bytes tagged
-  with the topic's `data_type`.
+  The topic determines the payload type — see `ExWebull.Mqtt.Topics`.
+  Protobuf topics decode to structs under `ExWebull.Proto.Message`,
+  `notice` decodes as JSON, and `echo` is an empty heartbeat.
   """
 
-  alias ExWebull.Mqtt.Topics
   alias ExWebull.Proto.Message
-
-  @payload_type_quote 0
-  @payload_type_snapshot 1
-  @payload_type_tick 2
 
   @type decoded ::
           {:quote, Message.Quote.t()}
           | {:snapshot, Message.Snapshot.t()}
           | {:tick, Message.Tick.t()}
-          | {:unknown, non_neg_integer(), binary()}
+          | {:event_quote, Message.EventQuote.t()}
+          | {:event_snapshot, Message.EventSnapshot.t()}
+          | {:event_tick, Message.EventTick.t()}
+          | {:notice, map()}
+          | :echo
+          | {:unknown, String.t(), binary()}
 
   @doc """
-  Decodes a `{topic, payload}` pair into a typed struct tagged with its
-  payload category.
+  Decodes a `{topic, payload}` pair.
+
+  Returns `{:ok, topic, decoded}`, or `{:error, {:invalid_payload, topic,
+  reason}}` when a payload cannot be parsed. Unrecognised topics are
+  returned as `{:unknown, topic, raw_bytes}` rather than an error, so a
+  new server-side topic does not crash the connection.
   """
-  @spec decode(String.t(), binary()) :: {:ok, Topics.t(), decoded()} | {:error, term()}
+  @spec decode(String.t(), binary()) :: {:ok, String.t(), decoded()} | {:error, term()}
   def decode(topic, payload) when is_binary(topic) and is_binary(payload) do
-    with {:ok, %Topics{data_type: dt} = topic_struct} <- Topics.decode(topic) do
-      {:ok, topic_struct, decode_payload(dt, payload)}
-    else
-      :error -> {:error, {:invalid_topic, topic}}
-    end
+    {:ok, topic, decode_payload(topic, payload)}
+  rescue
+    e -> {:error, {:invalid_payload, topic, e}}
   end
 
-  @spec decode_payload(non_neg_integer(), binary()) :: decoded()
-  def decode_payload(@payload_type_quote, bytes), do: {:quote, Message.Quote.decode(bytes)}
+  @doc "Decodes a payload for a known topic name."
+  @spec decode_payload(String.t(), binary()) :: decoded()
+  def decode_payload("quote", bytes), do: {:quote, Message.Quote.decode(bytes)}
+  def decode_payload("snapshot", bytes), do: {:snapshot, Message.Snapshot.decode(bytes)}
+  def decode_payload("tick", bytes), do: {:tick, Message.Tick.decode(bytes)}
 
-  def decode_payload(@payload_type_snapshot, bytes),
-    do: {:snapshot, Message.Snapshot.decode(bytes)}
+  def decode_payload("event-quote", bytes),
+    do: {:event_quote, Message.EventQuote.decode(bytes)}
 
-  def decode_payload(@payload_type_tick, bytes), do: {:tick, Message.Tick.decode(bytes)}
-  def decode_payload(other, bytes), do: {:unknown, other, bytes}
+  def decode_payload("event-snapshot", bytes),
+    do: {:event_snapshot, Message.EventSnapshot.decode(bytes)}
+
+  def decode_payload("event-tick", bytes),
+    do: {:event_tick, Message.EventTick.decode(bytes)}
+
+  def decode_payload("notice", bytes), do: {:notice, Jason.decode!(bytes)}
+  def decode_payload("echo", _bytes), do: :echo
+  def decode_payload(topic, bytes), do: {:unknown, topic, bytes}
 end

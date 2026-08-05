@@ -1,59 +1,41 @@
 defmodule ExWebull.Mqtt.Topics do
   @moduledoc """
-  Encode/parse Webull market-push MQTT topic strings.
+  The MQTT topics Webull publishes market data on.
 
-  Topic format: `"<instrument_id>-<data_type_code>-<interval>"`.
+  | Topic | Payload | Applies to |
+  |---|---|---|
+  | `quote` | protobuf `Quote` | stocks, futures, crypto |
+  | `snapshot` | protobuf `Snapshot` | stocks, futures, crypto |
+  | `tick` | protobuf `Tick` | stocks, futures, crypto |
+  | `event-quote` | protobuf `EventQuote` | event contracts |
+  | `event-snapshot` | protobuf `EventSnapshot` | event contracts |
+  | `event-tick` | protobuf `EventTick` | event contracts |
+  | `notice` | JSON | server notifications |
+  | `echo` | empty | heartbeat / online check |
 
-  The Python SDK's split-on-`-` is careful with instruments containing
-  a dash — it requires `len(segments) > 3` before accepting the topic.
-  We follow the same rule: the last two segments are always the data
-  type and interval; everything before is the instrument id (which may
-  contain dashes).
+  Which symbols arrive on a topic is controlled by
+  `ExWebull.MarketData.Streaming.subscribe/4`, not by the topic name.
   """
 
-  @enforce_keys [:instrument_id, :data_type, :interval]
-  defstruct [:instrument_id, :data_type, :interval]
+  @topics ~w(quote snapshot tick event-quote event-snapshot event-tick notice echo)
 
-  @type t :: %__MODULE__{
-          instrument_id: String.t(),
-          data_type: non_neg_integer(),
-          interval: non_neg_integer()
-        }
+  @market_topics ~w(quote snapshot tick)
+  @event_topics ~w(event-quote event-snapshot event-tick)
 
-  @doc "Decodes a topic string. Returns `{:ok, topic}` or `:error`."
-  @spec decode(String.t()) :: {:ok, t()} | :error
-  def decode(""), do: :error
-  def decode(nil), do: :error
+  @doc "Every topic Webull publishes on."
+  @spec all() :: [String.t()]
+  def all, do: @topics
 
-  def decode(topic) when is_binary(topic) do
-    case String.split(topic, "-") do
-      segments when length(segments) > 3 ->
-        [interval, data_type | instrument_parts_rev] = Enum.reverse(segments)
-        instrument_id = instrument_parts_rev |> Enum.reverse() |> Enum.join("-")
+  @doc "The stock / futures / crypto data topics."
+  @spec market() :: [String.t()]
+  def market, do: @market_topics
 
-        with {dt, ""} <- Integer.parse(data_type),
-             {iv, ""} <- Integer.parse(interval) do
-          {:ok, %__MODULE__{instrument_id: instrument_id, data_type: dt, interval: iv}}
-        else
-          _ -> :error
-        end
+  @doc "The event-contract data topics."
+  @spec event() :: [String.t()]
+  def event, do: @event_topics
 
-      [instrument_id, data_type, interval] ->
-        with {dt, ""} <- Integer.parse(data_type),
-             {iv, ""} <- Integer.parse(interval) do
-          {:ok, %__MODULE__{instrument_id: instrument_id, data_type: dt, interval: iv}}
-        else
-          _ -> :error
-        end
-
-      _ ->
-        :error
-    end
-  end
-
-  @doc "Encodes a topic struct back into the wire format."
-  @spec encode(t()) :: String.t()
-  def encode(%__MODULE__{instrument_id: iid, data_type: dt, interval: iv}) do
-    "#{iid}-#{dt}-#{iv}"
-  end
+  @doc "Returns true when `topic` is one Webull publishes on."
+  @spec known?(String.t()) :: boolean()
+  def known?(topic) when is_binary(topic), do: topic in @topics
+  def known?(_), do: false
 end

@@ -3,6 +3,8 @@ defmodule ExWebull.ClientTest do
 
   alias ExWebull.Client
 
+  defp header(req, name), do: Req.Request.get_header(req, name)
+
   describe "new/3" do
     test "returns a Req.Request with the configured base url" do
       req = Client.new("ak", "sk")
@@ -12,6 +14,29 @@ defmodule ExWebull.ClientTest do
 
     test "honors a :base_url override" do
       req = Client.new("ak", "sk", base_url: "https://example.test")
+      assert req.options.base_url == "https://example.test"
+    end
+
+    test "sends x-version v2 by default and honours an override" do
+      assert header(Client.new("ak", "sk"), "x-version") == ["v2"]
+      assert header(Client.new("ak", "sk", api_version: "v1"), "x-version") == ["v1"]
+    end
+
+    test "sets x-access-token only when one is given" do
+      assert header(Client.new("ak", "sk"), "x-access-token") == []
+      assert header(Client.new("ak", "sk", access_token: "TKN"), "x-access-token") == ["TKN"]
+    end
+  end
+
+  describe "new_market_data/3" do
+    test "points at the market data host" do
+      req = Client.new_market_data("ak", "sk")
+      assert req.options.base_url == Client.market_data_base_url()
+      assert req.options.base_url != Client.base_url()
+    end
+
+    test "an explicit base_url still wins" do
+      req = Client.new_market_data("ak", "sk", base_url: "https://example.test")
       assert req.options.base_url == "https://example.test"
     end
   end
@@ -25,12 +50,12 @@ defmodule ExWebull.ClientTest do
       assert Client.region() == "US"
     end
 
-    test "mqtt_endpoint/0 returns host/port tuple" do
-      assert {"usquotes-api.webullfintech.com", 8883} = Client.mqtt_endpoint()
+    test "market_data_base_url/0 returns the configured value" do
+      assert Client.market_data_base_url() == "https://broker-api.webull.com"
     end
 
-    test "quotes_grpc_endpoint/0 returns host/port tuple" do
-      assert {"api.webull.com", 443} = Client.quotes_grpc_endpoint()
+    test "mqtt_endpoint/0 returns host/port tuple" do
+      assert {"data-api.webull.com", 1883} = Client.mqtt_endpoint()
     end
 
     test "trade_events_endpoint/0 returns host/port tuple" do

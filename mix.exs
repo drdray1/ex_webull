@@ -16,7 +16,28 @@ defmodule ExWebull.MixProject do
       package: package(),
       name: "ExWebull",
       source_url: @source_url,
-      docs: docs()
+      docs: docs(),
+      test_coverage: test_coverage()
+    ]
+  end
+
+  # `mix test --cover` fails the run below this line.
+  #
+  # The ignored modules have no code of ours to exercise: `Fixtures` is
+  # test support, and the three generated modules are a single `use`
+  # macro each (`GRPC.Service`, `GRPC.Stub`, and a protobuf enum). The
+  # gRPC stub is in fact driven by the trade-events tests, but Mimic
+  # replaces the module, so cover cannot see it.
+  defp test_coverage do
+    [
+      threshold: 86,
+      ignore_modules: [
+        ExWebull.Fixtures,
+        ExWebull.Proto.Events.EventType,
+        ExWebull.Proto.Events.EventService.Service,
+        ExWebull.Proto.Events.EventService.Stub,
+        ~r/\.Mimic\.Original\.Module$/
+      ]
     ]
   end
 
@@ -59,21 +80,31 @@ defmodule ExWebull.MixProject do
       main: "ExWebull",
       extras: ["README.md"],
       groups_for_modules: [
-        "REST API": [
+        "Trading & Accounts": [
           ExWebull.Account,
-          ExWebull.Trading,
-          ExWebull.Instruments,
-          ExWebull.Calendar
+          ExWebull.Assets,
+          ExWebull.Trading
         ],
-        "Market Data (gRPC)": [
-          ExWebull.Market.Candlesticks,
-          ExWebull.Market.Snapshot,
-          ExWebull.Market.OrderBook,
-          ExWebull.Market.Tick,
-          ExWebull.Market.Token,
-          ExWebull.Market.Subscribe
+        Instruments: [
+          ExWebull.Instruments
+        ],
+        "Market Data": [
+          ExWebull.MarketData.Stock,
+          ExWebull.MarketData.Option,
+          ExWebull.MarketData.Futures,
+          ExWebull.MarketData.Crypto,
+          ExWebull.MarketData.Event,
+          ExWebull.MarketData.Screener,
+          ExWebull.MarketData.Watchlist,
+          ExWebull.News
+        ],
+        Fundamentals: [
+          ExWebull.Fundamentals.Stock,
+          ExWebull.Fundamentals.Financial,
+          ExWebull.Fundamentals.Fund
         ],
         "Streaming (MQTT)": [
+          ExWebull.MarketData.Streaming,
           ExWebull.Mqtt.Connection,
           ExWebull.Mqtt.Topics,
           ExWebull.Mqtt.Message
@@ -83,11 +114,13 @@ defmodule ExWebull.MixProject do
           ExWebull.TradeEvents.Event
         ],
         Authentication: [
-          ExWebull.Auth
+          ExWebull.Auth,
+          ExWebull.Token,
+          ExWebull.OAuth
         ],
         Client: [
           ExWebull.Client,
-          ExWebull.Grpc.Client
+          ExWebull.Request
         ]
       ]
     ]
