@@ -8,17 +8,21 @@ defmodule ExWebull.TradingTest do
     {:ok, stub: stub, client: test_client(stub)}
   end
 
-  test "place_order/3 posts single order wrapped in new_orders list", %{
+  defp version(conn), do: Plug.Conn.get_req_header(conn, "x-version")
+
+  test "place_order/4 wraps a single order and omits an unset combo id", %{
     stub: stub,
     client: client
   } do
     Req.Test.expect(stub, fn conn ->
       assert conn.method == "POST"
-      assert conn.request_path == "/openapi/account/orders/place"
-      assert conn.query_string =~ "account_id=ACC-1"
+      assert conn.request_path == "/openapi/trade/order/place"
+      assert version(conn) == ["v2"]
       {:ok, body, conn} = Plug.Conn.read_body(conn)
       payload = Jason.decode!(body)
-      assert %{"new_orders" => [%{"symbol" => "AAPL"}]} = payload
+      assert payload["account_id"] == "ACC-1"
+      assert [%{"symbol" => "AAPL"}] = payload["new_orders"]
+      refute Map.has_key?(payload, "client_combo_order_id")
       Req.Test.json(conn, %{"client_order_id" => "COID-1"})
     end)
 
@@ -26,137 +30,185 @@ defmodule ExWebull.TradingTest do
              ExWebull.Trading.place_order(client, "ACC-1", %{symbol: "AAPL", quantity: "1"})
   end
 
-  test "place_order/3 leaves a list as-is", %{stub: stub, client: client} do
+  test "place_order/4 forwards a combo id and a list of orders", %{stub: stub, client: client} do
     Req.Test.expect(stub, fn conn ->
       {:ok, body, conn} = Plug.Conn.read_body(conn)
       payload = Jason.decode!(body)
-      assert %{"new_orders" => [%{"symbol" => "AAPL"}, %{"symbol" => "TSLA"}]} = payload
+      assert payload["client_combo_order_id"] == "CMB-1"
+      assert [%{"symbol" => "AAPL"}, %{"symbol" => "TSLA"}] = payload["new_orders"]
       Req.Test.json(conn, %{})
     end)
 
-    ExWebull.Trading.place_order(client, "ACC-1", [%{symbol: "AAPL"}, %{symbol: "TSLA"}])
+    ExWebull.Trading.place_order(
+      client,
+      "ACC-1",
+      [%{symbol: "AAPL"}, %{symbol: "TSLA"}],
+      client_combo_order_id: "CMB-1"
+    )
   end
 
-  test "cancel_order/3 posts client_order_id body", %{stub: stub, client: client} do
+  test "place_order/4 sends option legs through", %{stub: stub, client: client} do
     Req.Test.expect(stub, fn conn ->
-      assert conn.request_path == "/openapi/account/orders/cancel"
       {:ok, body, conn} = Plug.Conn.read_body(conn)
-      assert %{"client_order_id" => "COID-1"} = Jason.decode!(body)
-      Req.Test.json(conn, %{"ok" => true})
+      assert %{"new_orders" => [order]} = Jason.decode!(body)
+      assert order["instrument_type"] == "OPTION"
+      assert order["option_strategy"] == "SINGLE"
+      assert [%{"option_type" => "CALL", "strike_price" => "220.00"}] = order["legs"]
+      Req.Test.json(conn, %{})
     end)
 
-    assert {:ok, _} = ExWebull.Trading.cancel_order(client, "ACC-1", "COID-1")
+    ExWebull.Trading.place_order(client, "ACC-1", %{
+      instrument_type: "OPTION",
+      option_strategy: "SINGLE",
+      symbol: "AAPL",
+      legs: [%{option_type: "CALL", strike_price: "220.00", option_expire_date: "2026-06-19"}]
+    })
   end
 
-  test "order_history/3 forwards paging options", %{stub: stub, client: client} do
+  test "preview_order/4 targets the preview path", %{stub: stub, client: client} do
     Req.Test.expect(stub, fn conn ->
-      assert conn.request_path == "/openapi/account/orders/history"
-      q = conn.query_string
-      assert q =~ "account_id=ACC-1"
-      assert q =~ "page_size=20"
-      assert q =~ "start_date=2026-01-01"
-      Req.Test.json(conn, %{"orders" => []})
-    end)
-
-    assert {:ok, _} =
-             ExWebull.Trading.order_history(client, "ACC-1",
-               page_size: 20,
-               start_date: "2026-01-01"
-             )
-  end
-
-  test "preview_order/3 and replace_order/3 target right endpoints", %{
-    stub: stub,
-    client: client
-  } do
-    Req.Test.expect(stub, fn conn ->
-      assert conn.request_path == "/openapi/account/orders/preview"
+      assert conn.request_path == "/openapi/trade/order/preview"
       Req.Test.json(conn, %{})
     end)
 
     ExWebull.Trading.preview_order(client, "ACC-1", %{symbol: "AAPL"})
+  end
 
+  test "batch_place_orders/3 posts batch_orders", %{stub: stub, client: client} do
     Req.Test.expect(stub, fn conn ->
-      assert conn.request_path == "/openapi/account/orders/replace"
+      assert conn.request_path == "/openapi/trade/order/batch-place"
       {:ok, body, conn} = Plug.Conn.read_body(conn)
-      assert %{"modify_orders" => [_]} = Jason.decode!(body)
+      assert %{"batch_orders" => [_, _]} = Jason.decode!(body)
+      Req.Test.json(conn, %{})
+    end)
+
+    ExWebull.Trading.batch_place_orders(client, "ACC-1", [%{symbol: "AAPL"}, %{symbol: "TSLA"}])
+  end
+
+  test "replace_order/3 posts modify_orders", %{stub: stub, client: client} do
+    Req.Test.expect(stub, fn conn ->
+      assert conn.request_path == "/openapi/trade/order/replace"
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      assert %{"modify_orders" => [%{"client_order_id" => "X"}]} = Jason.decode!(body)
       Req.Test.json(conn, %{})
     end)
 
     ExWebull.Trading.replace_order(client, "ACC-1", %{client_order_id: "X"})
   end
 
-  test "place_option/3 and cancel_option/3 hit option paths", %{stub: stub, client: client} do
+  test "cancel_order/3 posts account and client order ids", %{stub: stub, client: client} do
     Req.Test.expect(stub, fn conn ->
-      assert conn.request_path == "/openapi/account/orders/option/place"
-      Req.Test.json(conn, %{})
+      assert conn.request_path == "/openapi/trade/order/cancel"
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      assert %{"account_id" => "ACC-1", "client_order_id" => "COID-1"} = Jason.decode!(body)
+      Req.Test.json(conn, %{"ok" => true})
     end)
 
-    ExWebull.Trading.place_option(client, "ACC-1", %{symbol: "AAPL"})
-
-    Req.Test.expect(stub, fn conn ->
-      assert conn.request_path == "/openapi/account/orders/option/cancel"
-      Req.Test.json(conn, %{})
-    end)
-
-    ExWebull.Trading.cancel_option(client, "ACC-1", "COID-1")
+    assert {:ok, _} = ExWebull.Trading.cancel_order(client, "ACC-1", "COID-1")
   end
 
-  test "order_detail/3 sends account_id and client_order_id params", %{stub: stub, client: client} do
+  test "order_history/3 forwards paging options and returns option legs", %{
+    stub: stub,
+    client: client
+  } do
     Req.Test.expect(stub, fn conn ->
       assert conn.method == "GET"
-      assert conn.request_path == "/openapi/account/orders/detail"
+      assert conn.request_path == "/openapi/trade/order/history"
+      q = conn.query_string
+      assert q =~ "account_id=ACC-1"
+      assert q =~ "page_size=100"
+      assert q =~ "start_date=2026-01-01"
+      assert q =~ "end_date=2026-01-31"
+      assert q =~ "last_client_order_id=COID-9"
+      Req.Test.json(conn, [option_combo_order()])
+    end)
+
+    assert {:ok, [combo]} =
+             ExWebull.Trading.order_history(client, "ACC-1",
+               page_size: 100,
+               start_date: "2026-01-01",
+               end_date: "2026-01-31",
+               last_client_order_id: "COID-9"
+             )
+
+    assert [%{"instrument_type" => "OPTION", "legs" => [leg]}] = combo["orders"]
+    assert leg["option_type"] == "CALL"
+    assert leg["strike_price"] == "180.00"
+    assert leg["option_expire_date"] == "2026-06-19"
+  end
+
+  test "order_history/3 sends only account_id when no options given", %{
+    stub: stub,
+    client: client
+  } do
+    Req.Test.expect(stub, fn conn ->
+      assert conn.query_string == "account_id=ACC-1"
+      Req.Test.json(conn, [])
+    end)
+
+    assert {:ok, []} = ExWebull.Trading.order_history(client, "ACC-1")
+  end
+
+  test "open_orders/3 hits the open path", %{stub: stub, client: client} do
+    Req.Test.expect(stub, fn conn ->
+      assert conn.request_path == "/openapi/trade/order/open"
+      q = conn.query_string
+      assert q =~ "account_id=ACC-1"
+      assert q =~ "page_size=50"
+      Req.Test.json(conn, [])
+    end)
+
+    assert {:ok, []} = ExWebull.Trading.open_orders(client, "ACC-1", page_size: 50)
+  end
+
+  test "order_detail/3 sends account_id and client_order_id", %{stub: stub, client: client} do
+    Req.Test.expect(stub, fn conn ->
+      assert conn.request_path == "/openapi/trade/order/detail"
       q = conn.query_string
       assert q =~ "account_id=ACC-1"
       assert q =~ "client_order_id=COID-1"
-      Req.Test.json(conn, %{"client_order_id" => "COID-1"})
+      Req.Test.json(conn, option_combo_order())
     end)
 
-    assert {:ok, %{"client_order_id" => "COID-1"}} =
+    assert {:ok, %{"combo_order_id" => "CMB-1"}} =
              ExWebull.Trading.order_detail(client, "ACC-1", "COID-1")
   end
 
-  test "open_orders/2 hits legacy list-open and drops nils", %{stub: stub, client: client} do
+  test "activities/3 hits the trading activity list", %{stub: stub, client: client} do
     Req.Test.expect(stub, fn conn ->
-      assert conn.request_path == "/trade/orders/list-open"
+      assert conn.request_path == "/openapi/trading/activity/list"
       q = conn.query_string
       assert q =~ "account_id=ACC-1"
-      refute q =~ "missing"
-      Req.Test.json(conn, %{"orders" => []})
+      assert q =~ "activity_types=TRADE"
+      assert q =~ "page_size=200"
+      assert q =~ "last_activity_id=ACT-9"
+      Req.Test.json(conn, [%{"id" => "ACT-1", "activity_type" => "TRADE"}])
     end)
 
-    assert {:ok, _} = ExWebull.Trading.open_orders(client, account_id: "ACC-1", missing: nil)
+    assert {:ok, [%{"activity_type" => "TRADE"}]} =
+             ExWebull.Trading.activities(client, "ACC-1",
+               activity_types: "TRADE",
+               start_time: "2026-01-01T00:00:00.000Z",
+               page_size: 200,
+               last_activity_id: "ACT-9"
+             )
   end
 
-  test "today_orders/2 hits legacy list-today", %{stub: stub, client: client} do
+  test "open_orders/3 and activities/3 work without options", %{stub: stub, client: client} do
     Req.Test.expect(stub, fn conn ->
-      assert conn.request_path == "/trade/orders/list-today"
-      Req.Test.json(conn, %{"orders" => []})
+      assert conn.request_path == "/openapi/trade/order/open"
+      assert conn.query_string == "account_id=ACC-1"
+      Req.Test.json(conn, [])
     end)
 
-    assert {:ok, _} = ExWebull.Trading.today_orders(client, account_id: "ACC-1")
-  end
+    assert {:ok, []} = ExWebull.Trading.open_orders(client, "ACC-1")
 
-  test "preview_option/3 targets option preview path", %{stub: stub, client: client} do
     Req.Test.expect(stub, fn conn ->
-      assert conn.method == "POST"
-      assert conn.request_path == "/openapi/account/orders/option/preview"
-      {:ok, body, conn} = Plug.Conn.read_body(conn)
-      assert %{"new_orders" => [%{"symbol" => "AAPL"}]} = Jason.decode!(body)
-      Req.Test.json(conn, %{})
+      assert conn.request_path == "/openapi/trading/activity/list"
+      assert conn.query_string == "account_id=ACC-1"
+      Req.Test.json(conn, [])
     end)
 
-    ExWebull.Trading.preview_option(client, "ACC-1", %{symbol: "AAPL"})
-  end
-
-  test "replace_option/3 targets option replace path", %{stub: stub, client: client} do
-    Req.Test.expect(stub, fn conn ->
-      assert conn.request_path == "/openapi/account/orders/option/replace"
-      {:ok, body, conn} = Plug.Conn.read_body(conn)
-      assert %{"modify_orders" => [%{"client_order_id" => "X"}]} = Jason.decode!(body)
-      Req.Test.json(conn, %{})
-    end)
-
-    ExWebull.Trading.replace_option(client, "ACC-1", %{client_order_id: "X"})
+    assert {:ok, []} = ExWebull.Trading.activities(client, "ACC-1")
   end
 end

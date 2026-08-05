@@ -16,6 +16,9 @@ defmodule ExWebull.Auth do
     - `x-signature-nonce` — unique random UUID
     - `x-signature` — base64-encoded HMAC-SHA1 signature
 
+  `x-version` and `x-access-token` are also required by the API but do
+  **not** participate in the signature; `ExWebull.Client` sets them.
+
   ## Signature algorithm
 
   1. Collect sign params: lowercased `x-app-key`, `x-timestamp`,
@@ -202,12 +205,13 @@ defmodule ExWebull.Auth do
   defp extract_body(%{body: nil}), do: nil
   defp extract_body(%{body: ""}), do: nil
   defp extract_body(%{body: body}) when is_binary(body), do: body
+
+  # Req encodes JSON into iodata before request steps run, so a `json:`
+  # body reaches the signer already serialized.
   defp extract_body(%{body: body}) when is_list(body), do: IO.iodata_to_binary(body)
 
-  defp extract_body(%{body: {:json, data}}) when is_map(data) or is_list(data) do
-    Jason.encode!(data)
-  end
-
+  # Streamed and enumerable bodies cannot be hashed up front; they sign
+  # as if there were no body.
   defp extract_body(_), do: nil
 
   defp merge_query(sign_params, query) when query == %{}, do: sign_params

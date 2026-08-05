@@ -1,45 +1,72 @@
 defmodule ExWebull do
   @moduledoc """
-  Elixir client for the [Webull OpenAPI](https://developer.webull.com/api-doc/).
+  Elixir client for the [Webull OpenAPI](https://developer.webull.com/apis/docs/).
 
-  Covers the HTTP Trading and Market-Data REST endpoints, the gRPC
-  market-data and trade-events streams, and the MQTT market-push channel.
+  Covers the HTTP Trading, Market Data, Instrument, and Fundamentals
+  endpoints, the MQTT market-data stream, and the gRPC trade-events
+  stream.
 
-  ## Quick start — HTTP trading
+  ## Two clients
 
-      client = ExWebull.Client.new("app_key", "app_secret")
+  Trading and market data live on different hosts:
 
-      {:ok, accounts} = ExWebull.Account.list(client)
-      {:ok, balance} = ExWebull.Account.balance(client, "ACC-1")
+      trade = ExWebull.Client.new("app_key", "app_secret")
+      md    = ExWebull.Client.new_market_data("app_key", "app_secret")
+
+  With Two-Factor Authentication enabled, create and verify an access
+  token first — see `ExWebull.Token`.
+
+  ## Modules
+
+  | Area | Module |
+  |---|---|
+  | Accounts | `ExWebull.Account`, `ExWebull.Assets` |
+  | Orders and activity | `ExWebull.Trading` |
+  | Instrument reference data | `ExWebull.Instruments` |
+  | Market data | `ExWebull.MarketData.Stock`, `.Option`, `.Futures`, `.Crypto`, `.Event` |
+  | Ranked lists and watchlists | `ExWebull.MarketData.Screener`, `.Watchlist` |
+  | Streaming subscriptions | `ExWebull.MarketData.Streaming`, `ExWebull.Mqtt.Connection` |
+  | Fundamentals | `ExWebull.Fundamentals.Stock`, `.Financial`, `.Fund` |
+  | News | `ExWebull.News` |
+  | Auth | `ExWebull.Token`, `ExWebull.OAuth`, `ExWebull.Auth` |
+  | Trade events | `ExWebull.TradeEvents.Connection` |
+
+  ## Quick start — trading
+
+      {:ok, accounts} = ExWebull.Account.list(trade)
+      {:ok, balance} = ExWebull.Assets.balance(trade, "ACC-1")
 
       {:ok, resp} =
-        ExWebull.Trading.place_order(client, "ACC-1", %{
+        ExWebull.Trading.place_order(trade, "ACC-1", %{
+          client_order_id: "unique-id",
+          combo_type: "NORMAL",
+          instrument_type: "EQUITY",
+          market: "US",
           symbol: "AAPL",
-          quantity: "1",
           side: "BUY",
-          tif: "DAY",
-          order_type: "MKT"
+          order_type: "MARKET",
+          quantity: "1",
+          entrust_type: "QTY",
+          time_in_force: "DAY"
         })
 
   ## Streaming market data (MQTT)
 
-      {:ok, grpc} =
-        ExWebull.Grpc.Client.start_link(app_key: "ak", app_secret: "sk")
-
-      {:ok, %{token: token}} = ExWebull.Market.Token.get(grpc)
-
       {:ok, mqtt} =
         ExWebull.Mqtt.Connection.start_link(
           app_key: "ak",
-          token: token,
+          session_id: "my-session",
           subscribers: [self()]
         )
 
-      ExWebull.Market.Subscribe.subscribe(grpc, token, ["AAPL"], "US_STOCK", ["SNAPSHOT"])
-      ExWebull.Mqtt.Connection.subscribe_topic(mqtt, "913256135-1-1000")
+      ExWebull.MarketData.Streaming.subscribe(md, "my-session", ["AAPL"],
+        sub_types: ["SNAPSHOT"]
+      )
+
+      ExWebull.Mqtt.Connection.subscribe_topic(mqtt, "snapshot")
 
       receive do
-        {:webull_event, topic, {:snapshot, snap}} -> IO.inspect(snap)
+        {:webull_event, "snapshot", {:snapshot, snap}} -> IO.inspect(snap)
       end
 
   ## Streaming trade events (gRPC)
@@ -62,18 +89,17 @@ defmodule ExWebull do
 
       config :ex_webull, :config,
         base_url: "https://api.webull.com",
-        mqtt_host: "usquotes-api.webullfintech.com",
-        mqtt_port: 8883,
-        quotes_host: "api.webull.com",
-        quotes_port: 443,
+        market_data_base_url: "https://broker-api.webull.com",
+        mqtt_host: "data-api.webull.com",
+        mqtt_port: 1883,
         trade_events_host: "events-api.webull.com",
         trade_events_port: 443,
         region: "US"
-
-  See `ExWebull.Client`, `ExWebull.Auth`, `ExWebull.Grpc.Client`,
-  `ExWebull.Mqtt.Connection`, and `ExWebull.TradeEvents.Connection` for
-  details.
   """
 
   defdelegate new(app_key, app_secret, opts \\ []), to: ExWebull.Client, as: :new
+
+  defdelegate new_market_data(app_key, app_secret, opts \\ []),
+    to: ExWebull.Client,
+    as: :new_market_data
 end

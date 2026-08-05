@@ -163,19 +163,17 @@ defmodule ExWebull.TradeEvents.Connection do
   end
 
   defp consume(stream, owner) do
-    try do
-      Enum.each(stream, fn
-        {:ok, %SubscribeResponse{} = resp} ->
-          send(owner, {:trade_event_frame, resp})
+    Enum.each(stream, fn
+      {:ok, %SubscribeResponse{} = resp} ->
+        send(owner, {:trade_event_frame, resp})
 
-        {:error, reason} ->
-          send(owner, {:trade_event_stream_closed, reason})
-      end)
+      {:error, reason} ->
+        send(owner, {:trade_event_stream_closed, reason})
+    end)
 
-      send(owner, {:trade_event_stream_closed, :normal})
-    catch
-      kind, reason ->
-        send(owner, {:trade_event_stream_closed, {kind, reason}})
-    end
+    send(owner, {:trade_event_stream_closed, :normal})
+  catch
+    kind, reason ->
+      send(owner, {:trade_event_stream_closed, {kind, reason}})
   end
 end

@@ -1,13 +1,11 @@
 defmodule ExWebull.ProtoTest do
   use ExUnit.Case, async: true
 
-  alias ExWebull.Proto.Message
-  alias ExWebull.Proto.Quote
-  alias ExWebull.Proto.Gateway
   alias ExWebull.Proto.Events
+  alias ExWebull.Proto.Message
 
   describe "MQTT market push messages" do
-    test "Snapshot round-trips through protobuf" do
+    test "Snapshot round-trips including extended and overnight sessions" do
       snapshot = %Message.Snapshot{
         basic: %Message.Basic{symbol: "AAPL", instrument_id: "123", timestamp: "100"},
         trade_time: "2026-04-22T15:30:00Z",
@@ -18,15 +16,19 @@ defmodule ExWebull.ProtoTest do
         pre_close: "179.25",
         volume: "1000000",
         change: "1.25",
-        change_ratio: "0.70"
+        change_ratio: "0.70",
+        ext_price: "180.90",
+        ovn_price: "181.10",
+        ovn_volume: "5000"
       }
 
-      encoded = Message.Snapshot.encode(snapshot)
-      decoded = Message.Snapshot.decode(encoded)
+      decoded = snapshot |> Message.Snapshot.encode() |> Message.Snapshot.decode()
 
       assert decoded.basic.symbol == "AAPL"
       assert decoded.price == "180.50"
-      assert decoded.change_ratio == "0.70"
+      assert decoded.ext_price == "180.90"
+      assert decoded.ovn_price == "181.10"
+      assert decoded.ovn_volume == "5000"
     end
 
     test "Quote with nested asks/bids round-trips" do
@@ -36,105 +38,116 @@ defmodule ExWebull.ProtoTest do
         bids: [%Message.AskBid{price: "180.00", size: "200"}]
       }
 
-      encoded = Message.Quote.encode(quote_msg)
-      decoded = Message.Quote.decode(encoded)
+      decoded = quote_msg |> Message.Quote.encode() |> Message.Quote.decode()
 
-      assert [%Message.AskBid{price: "181.00", size: "100"}] = decoded.asks
-      assert [%Message.AskBid{price: "180.00", size: "200"}] = decoded.bids
+      assert [%Message.AskBid{price: "181.00"}] = decoded.asks
+      assert [%Message.AskBid{price: "180.00"}] = decoded.bids
+    end
+
+    test "Quote asks carry per-order and per-broker detail" do
+      ask = %Message.AskBid{
+        price: "181.00",
+        size: "100",
+        order: [%Message.Order{mpid: "NSDQ", size: "50"}],
+        broker: [%Message.Broker{bid: "B1", name: "Broker One"}]
+      }
+
+      decoded =
+        %Message.Quote{asks: [ask]} |> Message.Quote.encode() |> Message.Quote.decode()
+
+      assert [%{order: [%{mpid: "NSDQ"}], broker: [%{name: "Broker One"}]}] = decoded.asks
     end
 
     test "Tick round-trips" do
       tick = %Message.Tick{
-        basic: %Message.Basic{symbol: "AAPL"},
+        basic: %Message.Basic{symbol: "AAPL", instrument_id: "123", timestamp: "100"},
         time: "100",
         price: "180.50",
         volume: "100",
-        side: "B"
+        side: "BUY"
       }
 
       decoded = tick |> Message.Tick.encode() |> Message.Tick.decode()
-      assert decoded.side == "B"
-      assert decoded.price == "180.50"
+      assert decoded.side == "BUY"
+      assert decoded.basic.instrument_id == "123"
     end
   end
 
-  describe "gRPC quote messages" do
-    test "InstrumentRequest/Response round-trip" do
-      req = %Quote.InstrumentRequest{symbols: "AAPL,TSLA", category: "US_STOCK"}
-      decoded = req |> Quote.InstrumentRequest.encode() |> Quote.InstrumentRequest.decode()
-      assert decoded.symbols == "AAPL,TSLA"
-      assert decoded.category == "US_STOCK"
-
-      resp = %Quote.InstrumentResponse{
-        result: [%Quote.Instrument{name: "Apple", symbol: "AAPL", instrument_id: "1"}]
+  describe "event contract push messages" do
+    test "EventQuote splits yes and no bids" do
+      msg = %Message.EventQuote{
+        basic: %Message.Basic{symbol: "EVT", instrument_id: "9", timestamp: "1"},
+        yes_bids: [%Message.EventAskBid{price: "0.62", size: "10"}],
+        no_bids: [%Message.EventAskBid{price: "0.38", size: "12"}]
       }
 
-      decoded_resp =
-        resp |> Quote.InstrumentResponse.encode() |> Quote.InstrumentResponse.decode()
-
-      assert [%Quote.Instrument{symbol: "AAPL"}] = decoded_resp.result
+      decoded = msg |> Message.EventQuote.encode() |> Message.EventQuote.decode()
+      assert [%{price: "0.62"}] = decoded.yes_bids
+      assert [%{price: "0.38"}] = decoded.no_bids
     end
 
-    test "BatchBarsRequest with int32 count and repeated fields" do
-      req = %Quote.BatchBarsRequest{
-        symbols: ["AAPL", "TSLA"],
-        category: "US_STOCK",
-        timespan: "m1",
-        count: 100,
-        trading_sessions: ["REGULAR", "PRE_MARKET"]
+    test "EventSnapshot round-trips both sides of the book" do
+      msg = %Message.EventSnapshot{
+        basic: %Message.Basic{symbol: "EVT", instrument_id: "9", timestamp: "1"},
+        price: "0.62",
+        open_interest: "1200",
+        yes_ask: "0.63",
+        yes_bid: "0.62",
+        no_ask: "0.39",
+        no_bid: "0.37"
       }
 
-      decoded = req |> Quote.BatchBarsRequest.encode() |> Quote.BatchBarsRequest.decode()
-      assert decoded.symbols == ["AAPL", "TSLA"]
-      assert decoded.count == 100
-      assert decoded.trading_sessions == ["REGULAR", "PRE_MARKET"]
+      decoded = msg |> Message.EventSnapshot.encode() |> Message.EventSnapshot.decode()
+      assert decoded.open_interest == "1200"
+      assert decoded.yes_ask == "0.63"
+      assert decoded.no_bid == "0.37"
     end
 
-    test "TokenResponse round-trips" do
-      r = %Quote.TokenResponse{token: "abc-123"}
-      assert r |> Quote.TokenResponse.encode() |> Quote.TokenResponse.decode() == r
-    end
-  end
-
-  describe "gateway envelope" do
-    test "ClientRequest with payload bytes round-trips" do
-      inner_bytes =
-        %Quote.InstrumentRequest{symbols: "AAPL", category: "US_STOCK"}
-        |> Quote.InstrumentRequest.encode()
-        |> IO.iodata_to_binary()
-
-      req = %Gateway.ClientRequest{
-        type: :Payload,
-        requestId: "req-1",
-        path: "/instrument/list",
-        payload: inner_bytes
+    test "EventTick round-trips" do
+      msg = %Message.EventTick{
+        basic: %Message.Basic{symbol: "EVT", instrument_id: "9", timestamp: "1"},
+        yes_price: "0.62",
+        no_price: "0.38",
+        volume: "5",
+        side: "BUY",
+        trade_id: "T-1",
+        time: "100"
       }
 
-      decoded = req |> Gateway.ClientRequest.encode() |> Gateway.ClientRequest.decode()
-      assert decoded.type == :Payload
-      assert decoded.path == "/instrument/list"
-      assert is_binary(decoded.payload)
-
-      inner_decoded = Quote.InstrumentRequest.decode(decoded.payload)
-      assert inner_decoded.symbols == "AAPL"
+      decoded = msg |> Message.EventTick.encode() |> Message.EventTick.decode()
+      assert decoded.trade_id == "T-1"
+      assert decoded.yes_price == "0.62"
     end
   end
 
   describe "trade events" do
-    test "SubscribeResponse round-trips and decodes event type enum" do
-      r = %Events.SubscribeResponse{
-        eventType: :SubscribeSuccess,
+    test "SubscribeRequest round-trips" do
+      req = %Events.SubscribeRequest{
         subscribeType: 1,
+        timestamp: 1_767_225_600_000,
         contentType: "application/json",
-        payload: ~s({"status":"ok"}),
-        requestId: "req-1",
-        timestamp: 1_700_000_000
+        payload: "{}",
+        accounts: ["ACC-1", "ACC-2"]
       }
 
-      decoded = r |> Events.SubscribeResponse.encode() |> Events.SubscribeResponse.decode()
-      assert decoded.eventType == :SubscribeSuccess
+      decoded = req |> Events.SubscribeRequest.encode() |> Events.SubscribeRequest.decode()
+      assert decoded.accounts == ["ACC-1", "ACC-2"]
       assert decoded.subscribeType == 1
-      assert decoded.timestamp == 1_700_000_000
+    end
+
+    test "SubscribeResponse carries a typed event and JSON payload" do
+      resp = %Events.SubscribeResponse{
+        eventType: :Ping,
+        subscribeType: 1,
+        contentType: "application/json",
+        payload: ~s({"status":"FILLED"}),
+        requestId: "REQ-1",
+        timestamp: 1_767_225_600_000
+      }
+
+      decoded = resp |> Events.SubscribeResponse.encode() |> Events.SubscribeResponse.decode()
+      assert decoded.eventType == :Ping
+      assert decoded.payload == ~s({"status":"FILLED"})
     end
   end
 end

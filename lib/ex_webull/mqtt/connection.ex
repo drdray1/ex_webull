@@ -1,43 +1,52 @@
 defmodule ExWebull.Mqtt.Connection do
   @moduledoc """
-  GenServer wrapping `Tortoise311` for Webull's MQTTv3.1.1 market-push
+  GenServer wrapping `Tortoise311` for Webull's MQTT v3.1.1 market-data
   stream.
 
   ## Flow
 
-  1. Caller provides a streaming `token` (obtained via
-     `ExWebull.Market.Token.get/1`).
-  2. Connects to `usquotes-api.webullfintech.com:8883` over TLS.
-  3. MQTT CONNECT uses `user_name = password = token`, client id a
-     random UUID prefixed with the app key.
-  4. Each subscribed topic's payload is decoded by
-     `ExWebull.Mqtt.Message` and fanned out to subscriber PIDs as
-     `{:webull_event, topic_struct, decoded}`.
+  1. Pick a `session_id` — any unique string. It is both the MQTT
+     ClientId and the handle the subscribe API uses to find your
+     connection.
+  2. Connect to `data-api.webull.com:1883` with the app key as username.
+     The password is ignored by the server.
+  3. Tell Webull which symbols to push with
+     `ExWebull.MarketData.Streaming.subscribe/4`.
+  4. Subscribe to the MQTT topics you want to receive — see
+     `ExWebull.Mqtt.Topics`.
 
-  ## Subscription
-
-  This module only handles the MQTT transport — you still need to call
-  `ExWebull.Market.Subscribe.subscribe/5` via a gRPC client to tell
-  Webull what data to push to you.
+  Each message is decoded by `ExWebull.Mqtt.Message` and fanned out to
+  subscriber PIDs as `{:webull_event, topic, decoded}`.
 
   ## Usage
 
       {:ok, mqtt} =
         ExWebull.Mqtt.Connection.start_link(
           app_key: "ak",
-          token: token,
+          session_id: "my-session",
           subscribers: [self()]
         )
 
-      ExWebull.Mqtt.Connection.subscribe_topic(mqtt, "913256135-1-1000")
+      md = ExWebull.Client.new_market_data("ak", "sk")
+      ExWebull.MarketData.Streaming.subscribe(md, "my-session", ["AAPL"])
+      ExWebull.Mqtt.Connection.subscribe_topic(mqtt, "snapshot")
 
       receive do
-        {:webull_event, topic, {:snapshot, snap}} -> IO.inspect(snap)
+        {:webull_event, "snapshot", {:snapshot, snap}} -> IO.inspect(snap)
       end
+
+  ## Connection rules
+
+  Each app key allows 5 concurrent connections, and reusing a
+  `session_id` disconnects the previous connection using it. After a
+  disconnect the server holds the slot for about a minute. Subscriptions
+  are *not* restored automatically on reconnect — re-subscribe.
   """
 
   use GenServer
   require Logger
+
+  alias ExWebull.Mqtt.Message
 
   @type t :: GenServer.server()
 
@@ -45,17 +54,26 @@ defmodule ExWebull.Mqtt.Connection do
   Starts an MQTT connection.
 
   ## Options
-    - `:app_key` (required) — used to derive client id
-    - `:token` (required) — streaming token from `ExWebull.Market.Token.get/1`
-    - `:host` / `:port` — override defaults
-    - `:subscribers` — initial list of PIDs to receive events
-    - `:name` — register the GenServer under a name
+
+    - `:app_key` (required) — sent as the MQTT username.
+    - `:session_id` — MQTT ClientId, also used by
+      `ExWebull.MarketData.Streaming.subscribe/4`. Generated if omitted;
+      read it back with `session_id/1`.
+    - `:host` / `:port` — override the defaults from app config.
+    - `:transport` — a Tortoise311 transport module. Defaults to
+      Tortoise311.Transport.Tcp; pass Tortoise311.Transport.SSL for TLS.
+    - `:subscribers` — initial list of PIDs to receive events.
+    - `:name` — register the GenServer under a name.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     {name, opts} = Keyword.pop(opts, :name)
     GenServer.start_link(__MODULE__, opts, if(name, do: [name: name], else: []))
   end
+
+  @doc "Returns the session id this connection registered with."
+  @spec session_id(t()) :: String.t()
+  def session_id(conn), do: GenServer.call(conn, :session_id)
 
   @doc "Adds a subscriber PID to receive `{:webull_event, ...}` messages."
   @spec add_subscriber(t(), pid()) :: :ok
@@ -65,7 +83,12 @@ defmodule ExWebull.Mqtt.Connection do
   @spec remove_subscriber(t(), pid()) :: :ok
   def remove_subscriber(conn, pid \\ self()), do: GenServer.call(conn, {:remove_subscriber, pid})
 
-  @doc "Subscribes to one or more topic strings on the MQTT broker."
+  @doc """
+  Subscribes to MQTT topic(s) — see `ExWebull.Mqtt.Topics` for the list.
+
+  This is the transport-level subscription. Which symbols flow through
+  is set by `ExWebull.MarketData.Streaming.subscribe/4`.
+  """
   @spec subscribe_topic(t(), String.t() | [String.t()]) :: :ok
   def subscribe_topic(conn, topic_or_topics),
     do: GenServer.call(conn, {:subscribe, List.wrap(topic_or_topics)})
@@ -84,22 +107,20 @@ defmodule ExWebull.Mqtt.Connection do
   @impl true
   def init(opts) do
     app_key = Keyword.fetch!(opts, :app_key)
-    token = Keyword.fetch!(opts, :token)
+    session_id = Keyword.get(opts, :session_id) || generate_session_id()
     {default_host, default_port} = ExWebull.Client.mqtt_endpoint()
     host = Keyword.get(opts, :host, default_host)
     port = Keyword.get(opts, :port, default_port)
+    transport = Keyword.get(opts, :transport, Tortoise311.Transport.Tcp)
     subscribers = Keyword.get(opts, :subscribers, []) |> MapSet.new()
 
-    client_id = "#{app_key}_#{generate_suffix()}"
     handler_ref = make_ref()
 
     connect_opts = [
-      client_id: client_id,
-      user_name: token,
-      password: token,
-      server:
-        {Tortoise311.Transport.SSL,
-         host: String.to_charlist(host), port: port, verify: :verify_none},
+      client_id: session_id,
+      user_name: app_key,
+      password: app_key,
+      server: {transport, server_opts(transport, host, port)},
       handler: {ExWebull.Mqtt.Handler, [owner: self(), ref: handler_ref]},
       subscriptions: []
     ]
@@ -108,7 +129,7 @@ defmodule ExWebull.Mqtt.Connection do
       {:ok, _pid} ->
         {:ok,
          %{
-           client_id: client_id,
+           session_id: session_id,
            subscribers: subscribers,
            topics: MapSet.new(),
            handler_ref: handler_ref
@@ -120,6 +141,8 @@ defmodule ExWebull.Mqtt.Connection do
   end
 
   @impl true
+  def handle_call(:session_id, _from, state), do: {:reply, state.session_id, state}
+
   def handle_call({:add_subscriber, pid}, _from, state) do
     {:reply, :ok, %{state | subscribers: MapSet.put(state.subscribers, pid)}}
   end
@@ -128,25 +151,25 @@ defmodule ExWebull.Mqtt.Connection do
     {:reply, :ok, %{state | subscribers: MapSet.delete(state.subscribers, pid)}}
   end
 
-  def handle_call({:subscribe, topics}, _from, %{client_id: cid} = state) do
-    for t <- topics, do: Tortoise311.Connection.subscribe(cid, t, qos: 0)
+  def handle_call({:subscribe, topics}, _from, %{session_id: sid} = state) do
+    for t <- topics, do: Tortoise311.Connection.subscribe(sid, t, qos: 0)
     {:reply, :ok, %{state | topics: Enum.into(topics, state.topics)}}
   end
 
-  def handle_call({:unsubscribe, topics}, _from, %{client_id: cid} = state) do
-    for t <- topics, do: Tortoise311.Connection.unsubscribe(cid, t)
+  def handle_call({:unsubscribe, topics}, _from, %{session_id: sid} = state) do
+    for t <- topics, do: Tortoise311.Connection.unsubscribe(sid, t)
     new_topics = Enum.reduce(topics, state.topics, &MapSet.delete(&2, &1))
     {:reply, :ok, %{state | topics: new_topics}}
   end
 
   @impl true
   def handle_info({:webull_mqtt_message, topic, payload}, state) do
-    case ExWebull.Mqtt.Message.decode(topic, payload) do
-      {:ok, topic_struct, decoded} ->
-        fanout(state.subscribers, {:webull_event, topic_struct, decoded})
+    case Message.decode(topic, payload) do
+      {:ok, topic, decoded} ->
+        fanout(state.subscribers, {:webull_event, topic, decoded})
 
       {:error, reason} ->
-        Logger.warning("ExWebull.Mqtt.Connection: invalid topic #{topic}: #{inspect(reason)}")
+        Logger.warning("ExWebull.Mqtt.Connection: undecodable message: #{inspect(reason)}")
     end
 
     {:noreply, state}
@@ -157,12 +180,18 @@ defmodule ExWebull.Mqtt.Connection do
     {:noreply, state}
   end
 
+  defp server_opts(Tortoise311.Transport.SSL, host, port),
+    do: [host: String.to_charlist(host), port: port, verify: :verify_none]
+
+  defp server_opts(_tcp, host, port),
+    do: [host: String.to_charlist(host), port: port]
+
   defp fanout(pids, msg) do
     for pid <- pids, is_pid(pid), Process.alive?(pid), do: send(pid, msg)
     :ok
   end
 
-  defp generate_suffix do
-    :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+  defp generate_session_id do
+    :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
   end
 end

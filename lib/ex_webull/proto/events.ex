@@ -9,7 +9,7 @@ defmodule ExWebull.Proto.Events do
 end
 
 defmodule ExWebull.Proto.Events.EventType do
-  @moduledoc false
+  @moduledoc "Server-side event kinds pushed on the trade-events stream."
   use Protobuf, enum: true, syntax: :proto3
 
   field(:SubscribeSuccess, 0)
@@ -20,7 +20,7 @@ defmodule ExWebull.Proto.Events.EventType do
 end
 
 defmodule ExWebull.Proto.Events.SubscribeRequest do
-  @moduledoc false
+  @moduledoc "Request to subscribe one or more accounts to trade events."
   use Protobuf, syntax: :proto3
 
   field(:subscribeType, 1, type: :uint32)
@@ -31,7 +31,7 @@ defmodule ExWebull.Proto.Events.SubscribeRequest do
 end
 
 defmodule ExWebull.Proto.Events.SubscribeResponse do
-  @moduledoc false
+  @moduledoc "A single trade-event push, with a JSON `payload`."
   use Protobuf, syntax: :proto3
 
   field(:eventType, 1, type: ExWebull.Proto.Events.EventType, enum: true)
