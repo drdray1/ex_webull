@@ -26,7 +26,7 @@ reference vectors in the signature docs.
 ```elixir
 def deps do
   [
-    {:ex_webull, "~> 0.1.0"}
+    {:ex_webull, "~> 0.1.2"}
   ]
 end
 ```
